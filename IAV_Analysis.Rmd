@@ -1,0 +1,359 @@
+---
+title: "IAV_Analysis"
+author: "Sarah Arcos"
+date: "May 9, 2019"
+output: html_document
+---
+
+This notebook takes input files from IDPicker and generates a final list of IAV VIR-CLASP hits ("binding proteins") by applying filters to the list. Here is a brief summary of the filtering steps:
+
+0. Ensure proteins have >= 2 unique peptides and >= 20% sequence coverage (not included in Sankey)
+
+1. Remove proteins that are not present in all 2 experimental replicates
+
+2. Remove proteins that are part of the CRAPome list of common mass-spec contaminants. 
+  -Experiment IDs used to generate CRAPome list are: CC405, CC406, CC410
+  -CRAPome list narrowed to proteins with an average spectra in the 3 experiments of >=2
+
+3. Remove proteins that are present in both control samples
+
+A Sankey diagram of the filtering process will be generated at the end of the analysis. The "raw" data file and "final" data file will be saved to an Output folder. To save the intermediate files from the filtering, uncomment the last code chunk.
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(here)
+library(networkD3)
+library(VennDiagram)
+
+#Function definitions
+read_files <- function(file_name) {
+  temp <- read_tsv(here("Input", file_name), progress = FALSE) %>%
+    select("Accession", "Description", "Filtered Spectra", "Distinct Peptides", "Coverage") %>%
+    mutate(source = str_replace(file_name, "\\.tsv", ""))
+}
+```
+
+##Input of data files
+-Split into Experimental (Exp) and no4SU control (Ctr) samples
+-Remove decoys
+-Perform Filter 0
+-Clean up the Accessions
+
+```{r}
+unfiltered_data <- map_df(list.files(here("Input")), read_files)
+
+print(paste("Number of unique proteins unfiltered: ", n_distinct(unfiltered_data$Accession)))
+
+filter0 <- unfiltered_data %>%
+  filter(!grepl("XXX", Accession)) %>%
+  filter(`Distinct Peptides` >= 2 & Coverage >= 10) %>%
+  separate(Accession, into = c("Trash", "Accession", "ID"), sep = "\\|", extra = "drop") %>%
+  select(-Trash, -`Distinct Peptides`, -Coverage)
+
+#Split into Experimental (Exp) and no4SU control (Ctr) samples
+
+filter0_Exp <- filter0 %>%
+  filter(!grepl("no4SU", source))
+
+print(paste("Number of unique proteins with basic filter: ", n_distinct(filter0_Exp$Accession)))
+
+filter0_Ctr <- filter0 %>%
+  filter(grepl("no4SU", source))
+```
+
+##Filter 1: Remove proteins that are not present in all 3 experimental replicates
+
+```{r}
+filter1 <- filter0_Exp %>%
+  group_by(Accession) %>%
+  mutate(exists = sum(`Filtered Spectra` > 0)) %>%
+  filter(exists == 2) %>%
+  select(-exists, -`Filtered Spectra`) %>%
+  unique()
+
+print(paste("Number of unique proteins in all replicates: ", n_distinct(filter1$Accession)))
+```
+
+##Filter 2: Remove proteins that are part of the CRAPome list of common mass-spec contaminants.
+-Read in CRAPome file, then remove entries with fewer than 2 average spectral counts
+
+```{r}
+crapome <- read_csv(here("CRAPome.csv")) %>%
+  filter(AVE_SC >= 2)
+
+filter2 <- filter1 %>%
+  filter(!(ID %in% crapome$UNIPROT_ID))
+
+print(paste("Number of unique proteins after Filter 2: ", n_distinct(filter2$Accession)))
+
+```
+
+##Filter 3: Remove proteins that are present in both control samples
+
+```{r}
+control <- filter0_Ctr %>%
+  group_by(Accession) %>%
+  mutate(exists = sum(`Filtered Spectra` > 0)) %>%
+  filter(exists == 2)
+
+filter3 <- filter2 %>%
+  filter(!(Accession %in% control$Accession))
+
+print(paste("Number of unique proteins in all replicates and not in controls: ", n_distinct(filter3$Accession)))
+
+#Save RDS
+saveRDS(filter3, file = "IAV_Hits.rds")
+```
+
+##Sankey generation
+-Code adapted from: https://www.r-graph-gallery.com/321-introduction-to-interactive-sankey-diagram-2/
+
+```{r fig.width = 10, fig.height = 6}
+# 1 ------ CONNECTION DATA FRAME
+
+# Usually what you have is a connection data frame: a list of flows with intensity for each flow
+links=data.frame(source=c("Unfiltered","Unfiltered", 
+                          "In all replicates", "In all replicates", 
+                          "Not in CRAPome", "Not in CRAPome"), 
+                 target=c("In all replicates","Not in all replicates", "Not in CRAPome", "CRAPome known contaminant", "Final Dataset", "ID'ed in negative control"), 
+                 value=c(n_distinct(filter1$Accession),
+                         (n_distinct(filter0_Exp$Accession) - n_distinct(filter1$Accession)),
+                         n_distinct(filter2$Accession),
+                         (n_distinct(filter1$Accession) - n_distinct(filter2$Accession)),
+                         n_distinct(filter3$Accession),
+                         n_distinct(filter2$Accession) - n_distinct(filter3$Accession)))
+
+# From these flows we need to create a node data frame: it lists every entities involved in the flow
+nodes=data.frame(name=c(as.character(links$source), as.character(links$target)) %>% unique())
+
+# With networkD3, connection must be provided using id, not using real name like in the links dataframe.. So we need to reformat it.
+links$IDsource=match(links$source, nodes$name)-1 
+links$IDtarget=match(links$target, nodes$name)-1
+
+# Make the Network
+sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "IDsource", Target = "IDtarget",
+              Value = "value", NodeID = "name", 
+              fontSize = 15, nodeWidth = 30, 
+              units = "Proteins", sinksRight=FALSE)
+```
+
+##Gene Ontology
+-Output the IDed proteins as a CSV of the Accession numbers. This file will be input into the tools on pantherdb.org
+
+```{r}
+write_csv(data_frame(Accession = filter3$Accession), here("Annotations", "all_iav_hits.csv"))
+```
+
+-Settings for pantherdb.org (April 10th, 2019):
+  1. Enter hits file
+  2. Select "homo sapiens"
+  3. Select "Statistical overrepresentation test" and default settings
+  4. Submit
+  5. Select GO molecular function or GO biological process
+  6. Fisher's exact test
+  7. Use bonferroni correction
+  8. Run analysis
+  9. Export files. Located in "Annotations" folder (IAV_molecularfunction.txt, IAV_biologicalprocess.txt)
+
+Graph
+- *Remove "Unclassified" annotation prior to ggplot
+
+```{r}
+molec <- read_tsv(here("Annotations", "IAV_molecularfunction.txt"), skip = 12)
+biol <- read_tsv(here("Annotations", "IAV_biologicalprocess.txt"), skip = 12)
+
+colnames(molec)[1] <- "GO type"
+colnames(biol)[1] <- "GO type"
+
+molec_top <- molec %>%
+  filter(`GO type` != "Unclassified (UNCLASSIFIED)") %>%
+  top_n(n = -10, wt = `all_iav_hits.csv (P-value)`) %>%
+  mutate(`GO analysis` = "molecular function")
+
+biol_top <- biol %>%
+  filter(`GO type` != "Unclassified (UNCLASSIFIED)") %>%
+  top_n(n = -10, wt = `all_iav_hits.csv (P-value)`) %>%
+  mutate(`GO analysis` = "biological process")
+
+biol_virus <- biol %>%
+  filter(`GO type` ==  "antigen processing and presentation (GO:0019882)" | grepl("viral", `GO type`)) %>%
+  mutate(`GO analysis` = "biological process") %>%
+  mutate(facets = "ZOther enriched terms")
+
+combined_go <- rbind(molec_top, biol_top) %>%
+  mutate(facets = "Top 10 terms by statistical significance") %>%
+  rbind(biol_virus) %>%
+  mutate(`GO type` = gsub("\\s*\\([^\\)]+\\)", "", `GO type`)) %>%
+  arrange(`GO analysis`, desc(`all_iav_hits.csv (P-value)`)) %>%
+  mutate(`GO type` = paste(`GO type`, "(p < ", `all_iav_hits.csv (P-value)`, ")")) %>%
+  mutate(`GO type` = forcats::fct_inorder(factor(`GO type`)))
+
+cbPalette <- c("#e5c494", "#999999")
+
+
+ggplot(combined_go, aes(x = `GO type`, y = `all_iav_hits.csv (138)`, fill = `GO analysis`)) +
+  geom_bar(stat = 'identity') +
+  coord_flip() +
+  scale_fill_manual(values=cbPalette) +
+  geom_text(aes(label = `GO type`, y = 0, hjust = 0), size = 2.5) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text.y = element_text(size = 12)) +
+  labs(y = "Number of Proteins", title = "GO analysis of IAV VIR-CLASP") +
+  facet_wrap(~facets, ncol = 1)
+
+ggsave(here("Figures", "IAV_GO_041119.pdf"))
+
+```
+
+##Overlaps with previous RBP annotations
+### Gerstberger Compilation
+  - See rtf in "Annotations" folder for explanation of Gerstberger dataset
+
+```{r}
+gerstberger <- read_csv(here("Annotations","Gerstberger_Uniprot.csv")) %>%
+  filter(Status == "reviewed") %>%
+  select("Accession" = Entry)
+```
+
+### GO RNA-binding annotations
+  - Retrieved from geneontology.org on 05/03/18
+
+```{r}
+go_rbp <- read_tsv(here("Annotations","RNA_binding_GO_050318.txt"), col_names = c("Accession", "Name"))
+go_rbp$Accession <- gsub(pattern = "UniProtKB\\:", go_rbp$Accession, replacement = "")
+go_rbp$Name = NULL
+```
+
+### Castello Interactome
+  - Same protocol as Gerstberger, Ensembl ID's were converted to current version, then converted to Uniprot ID`s for comparison
+
+```{r}
+castello <- read_csv(here("Annotations", "HeLaInteractome_uniprot.csv"), col_names = "Accession")
+```
+
+### Baltz Interactome
+
+```{r}
+baltz <- read_csv(here("Annotations", "Baltz_uniprot.csv")) %>%
+  select(Accession = Entry)
+```
+
+##Comparisons between Vir-CLASP, GO Annotated RBP's, Gerstberger RBP's, Castello RBP's, and Baltz RBP's
+
+```{r}
+iav_annotated <- filter3 %>%
+  filter(Accession %in% go_rbp$Accession |
+           Accession %in% gerstberger$Accession |
+           Accession %in% castello$Accession |
+           Accession %in% baltz$Accession)
+print(paste("Number of annotated RBPs: ", n_distinct(iav_annotated$Accession)))
+
+iav_unannotated <- filter(filter3, !(Accession %in% go_rbp$Accession) &
+                                 !(Accession %in% gerstberger$Accession) &
+                                 !(Accession %in% castello$Accession &
+                                     !(Accession %in% baltz$Accession)))
+print(paste("Number of unannotated RBPs: ", n_distinct(iav_unannotated$Accession)))
+
+```
+
+##Comparisons to VIR-CLASP with CHIKV (see other repository, CHIKV_VIRCLASP_Analysis)
+
+```{r}
+chikv <- readRDS(here("CHIKV", "CHIKV_Hits.rds"))
+
+overlap_iav_chikv <- filter3 %>%
+  filter(Accession %in% chikv$Accession)
+
+n_distinct(overlap_iav_chikv$Accession)
+
+write_csv(data_frame(Accession = overlap_iav_chikv$Accession), here("CHIKV", "overlap_iav_chikv.csv"))
+
+iav_only <- filter3 %>%
+  filter(!(Accession %in% chikv$Accession))
+
+write_csv(data_frame(Accession = iav_only$Accession), here("CHIKV", "iav_only_hits.csv"))
+
+n_distinct(iav_only$Accession)
+
+chikv_only <- chikv %>%
+  filter(!(Accession %in% filter3$Accession))
+
+write_csv(data_frame(Accession = chikv_only$Accession), here("CHIKV", "chikv_only_hits.csv"))
+
+n_distinct(chikv_only$Accession)
+
+venn.plot <- venn.diagram(
+  x = list(
+    "IAV" = unique(filter3$Accession),
+    "CHIKV" = unique(chikv$Accession)
+  ),
+  filename = NULL,
+  scaled = TRUE,
+  main = "VIR-CLASP Hits"
+
+)
+
+pdf(file = here("Figures", "IAV_CHIKV_Venn.pdf"))
+  grid.draw(venn.plot)
+dev.off()
+```
+
+
+##Supplementary Table generation
+
+```{r}
+sup_table_all <- filter3 %>%
+  select(-ID, -source) %>%
+  mutate(Name = str_extract(Description, "GN=[a-zA-Z0-9]* ")) %>%
+  mutate(Name = str_trim(gsub("GN=", "", Name))) %>%
+  unique()
+
+write_tsv(sup_table_all, here("Supplementary Tables", "Sup_Table_all_IAV.tsv"))
+
+
+rbp_sources <- bind_rows("GO: RNA-binding" = go_rbp, 
+                         "Gerstberger 2014" = gerstberger, 
+                         "Castello 2012" = castello, 
+                         "Baltz 2012" = baltz, .id = "Source")
+
+sup_table_rbp <- rbp_sources %>%
+  filter(Accession %in% filter3$Accession) %>%
+  full_join(iav_annotated, by = "Accession") %>%
+  mutate(Name = str_extract(Description, "GN=[a-zA-Z0-9]* ")) %>%
+  mutate(Name = str_trim(gsub("GN=", "", Name))) %>%
+  select(Accession, Name, Description, Source) %>%
+  unique() %>%
+  mutate(exists = "X") %>%
+  spread(Source, exists, fill = "")
+
+write_tsv(sup_table_rbp, here("Supplementary Tables", "Sup_Table_IAV_rbps.tsv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
