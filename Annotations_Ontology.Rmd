@@ -1,0 +1,204 @@
+---
+title: "Annotations_Ontology"
+author: "Sarah Arcos"
+date: "10/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(UpSetR)
+library(DOSE)
+library(Cairo)
+```
+
+
+## Load in IAV dataset
+
+```{r}
+iav <- read_tsv("IAV Results/Final_Results.tsv") %>%
+  filter(SigCount == "Yes" | SigQuant == "Yes")
+```
+
+## Create enrichGO object
+ - Use "simplify" function to collapse similar GO terms
+ - MF, BP, CC
+
+```{r, fig.width = 20, fig.height = 8}
+iav_MF <- enrichGO(gene     = iav$Proteins,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'UNIPROT',
+                ont           = "MF",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable = TRUE)
+
+iav_MF_simplified <- clusterProfiler::simplify(iav_MF)
+
+iav_BP <- enrichGO(gene     = iav$Proteins,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'UNIPROT',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable = TRUE)
+
+iav_BP_simplified <- clusterProfiler::simplify(iav_BP)
+
+iav_CC <- enrichGO(gene     = iav$Proteins,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'UNIPROT',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05,
+                readable = TRUE)
+
+iav_CC_simplified <- clusterProfiler::simplify(iav_CC)
+
+
+#cnetplot(hour0_minus_BP, showCategory = 10)
+
+# MF_plot <- dotplot(iav_MF, showCategory=10)
+# BP_plot <- dotplot(iav_BP, showCategory=10)
+# CC_plot <- dotplot(iav_CC, showCategory=10)
+# 
+# cowplot::plot_grid(MF_plot, BP_plot, CC_plot, ncol=3, labels=LETTERS[1:3])
+
+
+MF_plot_simplified <- dotplot(iav_MF_simplified, showCategory=10)
+BP_plot_simplified <- dotplot(iav_BP_simplified, showCategory=10)
+CC_plot_simplified <- dotplot(iav_CC_simplified, showCategory=10)
+
+iav_go <- cowplot::plot_grid(MF_plot_simplified, BP_plot_simplified, CC_plot_simplified, ncol=3, labels=LETTERS[1:3])
+
+CairoPDF(28, 8, file="iav_go.pdf", bg="transparent")
+iav_go
+dev.off()
+
+get_entrez <- function(dataset){
+  dataset %>%
+  filter(!(Proteins %in% c("P13717", "Q6ZSR9", "H9XN80"))) %>%
+  pull(Proteins) %>%
+  bitr(fromType = "UNIPROT", toType = "ENTREZID", OrgDb = "org.Hs.eg.db") %>%
+  dplyr::select(ENTREZID)
+}
+
+iav_kegg <- enrichKEGG(gene         = get_entrez(iav)$ENTREZID,
+                 organism     = 'hsa',
+                 pvalueCutoff = 0.05)
+
+
+get_symbol <- function(gene_ids){
+  gene_ids %>% stringr:: str_split("/") %>% pluck(1) %>%
+    glimpse() %>%
+    bitr(fromType = "ENTREZID", toType = "SYMBOL", OrgDb = "org.Hs.eg.db") %>%
+    pull(SYMBOL) %>%
+    paste(collapse = "/")
+}
+
+test <- data.frame(iav_kegg) %>%
+  mutate(geneID = purrr::map_chr(geneID, get_symbol))
+
+write.xlsx(test, file="Final Tables/MaxQuant Final/kegg_genesymbols.xlsx", row.names=FALSE)
+
+
+
+
+
+
+library(openxlsx)
+
+datasets <- list(
+  "Molecular function" = data.frame(iav_MF_simplified),
+  "Biological Process" = data.frame(iav_BP_simplified),
+  "Cellular Component" = data.frame(iav_CC_simplified),
+  "KEGG Pathways" = data.frame(iav_kegg)
+)
+write.xlsx(datasets, file="Final Tables/MaxQuant Final/functional_analyses.xlsx", row.names=FALSE)
+```
+
+
+
+
+## KEGG
+```{r}
+get_entrez <- function(dataset){
+  dataset %>%
+  filter(!(Proteins %in% c("P13717", "Q6ZSR9", "H9XN80"))) %>%
+  pull(Proteins) %>%
+  bitr(fromType = "UNIPROT", toType = "ENTREZID", OrgDb = "org.Hs.eg.db") %>%
+  dplyr::select(ENTREZID)
+}
+
+iav_kegg <- enrichKEGG(gene         = get_entrez(iav)$ENTREZID,
+                 organism     = 'hsa',
+                 pvalueCutoff = 0.05)
+
+dotplot(iav_kegg)
+
+
+CairoPDF(10, 10, file="iav_kegg.pdf", bg="transparent")
+dotplot(iav_kegg)
+dev.off()
+
+
+
+```
+
+
+## RBP Analysis
+
+```{r, message = FALSE}
+gerstberger <- read_csv("Annotations/Gerstberger_Uniprot.csv") %>%
+  filter(Status == "reviewed") %>%
+  dplyr::select("Accession" = Entry)
+
+go_rbp <- read_tsv("Annotations/RNA_binding_GO_050318.txt", col_names = c("Accession", "Name"))
+go_rbp$Accession <- gsub(pattern = "UniProtKB\\:", go_rbp$Accession, replacement = "")
+go_rbp$Name = NULL
+
+castello <- read_csv("Annotations/HeLaInteractome_uniprot.csv", col_names = "Accession")
+
+baltz <- read_csv("Annotations/Baltz_uniprot.csv") %>%
+  dplyr::select(Accession = Entry)
+
+known_rbps <- bind_rows(list("Gerstberger" = gerstberger,
+                             "Castello" = castello,
+                             "Baltz" = baltz,
+                             "GO" = go_rbp),
+                        .id = "Source") %>%
+  unique()
+
+iav_annotation <- iav %>%
+  mutate(Annotation = case_when(
+           Proteins %in% known_rbps$Accession ~ "Known",
+           TRUE ~ "Novel"),
+         IAV = "IAV")
+
+colors <- c("#d9d9d9", "#7fbf7b")
+
+annotation_plot <- ggplot(iav_annotation, aes(x = IAV, fill = Annotation)) +
+  scale_fill_manual(values = colors) +
+  geom_bar(position = "fill") +
+  theme_minimal()
+  #theme(panel.grid = element_blank())
+
+annotation_plot
+
+ggsave("rbps.pdf", plot = annotation_plot)
+```
+
+
+
+
+
+
+
+
+
