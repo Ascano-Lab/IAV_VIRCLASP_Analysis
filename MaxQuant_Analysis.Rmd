@@ -152,7 +152,7 @@ step4_plot <- function(dataset, name, results_dir) {
     spread(Sample, ave_log_ratio) %>%
     left_join(limma_data, by = "Proteins") %>%
     mutate(Significant = case_when(
-      adj.P.Val < 0.001  & AveExpr > (log2(5)) ~ "Yes",
+      adj.P.Val < 0.01  & AveExpr > (log2(5)) ~ "Yes",
       TRUE ~ "No"
     ))
   
@@ -312,7 +312,7 @@ step9 <- function(full_data, quant, semiquant, results_dir) {
     full_join(quant, by = "Proteins") %>%
     full_join(semiquant, by = "Proteins") %>%
     mutate(SigQuant = case_when(
-       adj.P.Val < 0.001  & AveExpr > (log2(5)) ~ "Yes",
+       adj.P.Val < 0.01  & AveExpr > (log2(5)) ~ "Yes",
        TRUE ~ "")
         ) %>%
     select(Proteins, logRatio.Replicate1 = 2,
